@@ -1,0 +1,209 @@
+import type { Metadata } from 'next';
+import { Plus, MapPin } from 'lucide-react';
+import { createClient } from '@/lib/supabase/server';
+
+export const metadata: Metadata = {
+  title: 'Users · MVAutoAssist Admin',
+};
+
+// ─── types ────────────────────────────────────────────────────────────────────
+
+type UserRow = {
+  id: string;
+  email: string;
+  full_name: string;
+  role: string;
+  location: string | null;
+  created_at: string;
+};
+
+// ─── helper ───────────────────────────────────────────────────────────────────
+
+function initials(name: string): string {
+  return name
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, 2)
+    .map(w => w[0].toUpperCase())
+    .join('');
+}
+
+// ─── page ─────────────────────────────────────────────────────────────────────
+
+export default async function UsersPage() {
+  const supabase = await createClient();
+
+  // Three parallel queries — join in JS to avoid complex PostgREST hints
+  const [
+    { data: rawUsers, error: e1 },
+    { data: certRows, error: e2 },
+    { data: tierRows, error: e3 },
+  ] = await Promise.all([
+    supabase
+      .from('users')
+      .select('id, email, full_name, role, location, created_at')
+      .order('created_at', { ascending: true }),
+
+    // Only need agent_id to count certificates per user
+    supabase
+      .from('certificates')
+      .select('agent_id'),
+
+    // Price tiers ordered so chips render lowest→highest
+    supabase
+      .from('price_tiers')
+      .select('user_id, amount')
+      .order('amount', { ascending: true }),
+  ]);
+
+  if (e1) console.error('[UsersPage] users:', e1);
+  if (e2) console.error('[UsersPage] certs:', e2);
+  if (e3) console.error('[UsersPage] tiers:', e3);
+
+  // Build lookup maps
+  const certCount = new Map<string, number>();
+  (certRows ?? []).forEach(c => {
+    if (c.agent_id) certCount.set(c.agent_id, (certCount.get(c.agent_id) ?? 0) + 1);
+  });
+
+  const userTiers = new Map<string, number[]>();
+  (tierRows ?? []).forEach(t => {
+    const existing = userTiers.get(t.user_id);
+    if (existing) existing.push(t.amount);
+    else userTiers.set(t.user_id, [t.amount]);
+  });
+
+  const users = (rawUsers ?? []) as UserRow[];
+
+  return (
+    <>
+      {/* Top bar */}
+      <div className="flex items-center justify-between px-6 lg:px-10 py-5 border-b border-stone-200 bg-white">
+        <div className="flex items-center gap-3">
+          <div className="lg:hidden w-9 shrink-0" />
+          <div>
+            <h1
+              style={{ fontFamily: "'Instrument Serif', serif" }}
+              className="text-3xl tracking-tight leading-none"
+            >
+              Users &amp; Roles
+            </h1>
+            <p className="text-sm text-stone-500 mt-1">
+              Manage dealers, agents, and their permissions
+            </p>
+          </div>
+        </div>
+        {/* Placeholder — modal wired in Week 3 */}
+        <button className="hidden sm:flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800 transition-colors">
+          <Plus className="w-4 h-4" />
+          New user
+        </button>
+      </div>
+
+      <div className="p-6 lg:p-10">
+        <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden">
+          {users.length === 0 ? (
+            <div className="py-16 text-center">
+              <p className="text-sm font-semibold text-stone-400">No users found</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-stone-50 border-b border-stone-200">
+                  <tr className="text-left text-xs uppercase tracking-wider text-stone-500">
+                    <th className="px-6 py-3 font-semibold">User</th>
+                    <th className="px-6 py-3 font-semibold hidden sm:table-cell">Role</th>
+                    <th className="px-6 py-3 font-semibold hidden md:table-cell">Location</th>
+                    <th className="px-6 py-3 font-semibold">Certificates</th>
+                    <th className="px-6 py-3 font-semibold hidden lg:table-cell">Allowed Prices</th>
+                    <th className="px-6 py-3" />
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-stone-100">
+                  {users.map(u => {
+                    const prices = userTiers.get(u.id) ?? [];
+                    const count  = certCount.get(u.id) ?? 0;
+
+                    return (
+                      <tr key={u.id} className="hover:bg-stone-50 transition-colors">
+
+                        {/* User — avatar + name + email */}
+                        <td className="px-6 py-4">
+                          <div className="flex items-center gap-3">
+                            <div className="w-9 h-9 rounded-full bg-gradient-to-br from-amber-400 to-red-500 flex items-center justify-center font-bold text-white text-xs shrink-0">
+                              {initials(u.full_name)}
+                            </div>
+                            <div className="min-w-0">
+                              <div className="font-semibold truncate">{u.full_name}</div>
+                              <div
+                                className="text-xs text-stone-500 truncate"
+                                style={{ fontFamily: "'JetBrains Mono', monospace" }}
+                              >
+                                {u.email}
+                              </div>
+                            </div>
+                          </div>
+                        </td>
+
+                        {/* Role badge */}
+                        <td className="px-6 py-4 hidden sm:table-cell">
+                          <span className={`text-xs font-semibold px-2 py-1 rounded-full ${
+                            u.role === 'admin'
+                              ? 'bg-slate-900 text-white'
+                              : 'bg-amber-100 text-amber-800'
+                          }`}>
+                            {u.role}
+                          </span>
+                        </td>
+
+                        {/* Location */}
+                        <td className="px-6 py-4 hidden md:table-cell">
+                          {u.location ? (
+                            <div className="flex items-center gap-1.5 text-sm text-stone-600">
+                              <MapPin className="w-3 h-3 shrink-0" />
+                              {u.location}
+                            </div>
+                          ) : (
+                            <span className="text-stone-400 text-xs">—</span>
+                          )}
+                        </td>
+
+                        {/* Certificate count */}
+                        <td className="px-6 py-4 font-semibold">{count}</td>
+
+                        {/* Price tier chips */}
+                        <td className="px-6 py-4 hidden lg:table-cell">
+                          {prices.length > 0 ? (
+                            <div className="flex gap-1 flex-wrap">
+                              {prices.map(p => (
+                                <span
+                                  key={p}
+                                  className="text-xs px-2 py-1 rounded bg-stone-100 font-medium"
+                                >
+                                  ₹{p.toLocaleString('en-IN')}
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-stone-400 text-xs">No prices set</span>
+                          )}
+                        </td>
+
+                        {/* Edit — placeholder */}
+                        <td className="px-6 py-4 text-right">
+                          <button className="text-xs font-semibold text-slate-900 hover:underline">
+                            Edit
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}

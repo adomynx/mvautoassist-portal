@@ -3,6 +3,7 @@ import {
   TrendingUp, Car, Bike, ArrowUpRight, ChevronRight,
 } from 'lucide-react';
 import { createClient } from '@/lib/supabase/server';
+import StatusBadge from '@/components/StatusBadge';
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
@@ -39,21 +40,6 @@ function dayLabel(isoDate: string): string {
   const [y, m, d] = isoDate.split('-').map(Number);
   return new Date(Date.UTC(y, m - 1, d))
     .toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' });
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const cfg: Record<string, { label: string; bg: string; text: string; dot: string }> = {
-    approved: { label: 'Approved', bg: 'bg-emerald-50', text: 'text-emerald-700', dot: 'bg-emerald-500' },
-    pending:  { label: 'Pending',  bg: 'bg-amber-50',   text: 'text-amber-700',   dot: 'bg-amber-500'   },
-    rejected: { label: 'Rejected', bg: 'bg-red-50',     text: 'text-red-700',     dot: 'bg-red-500'     },
-  };
-  const c = cfg[status] ?? { label: status, bg: 'bg-stone-100', text: 'text-stone-600', dot: 'bg-stone-400' };
-  return (
-    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold ${c.bg} ${c.text}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${c.dot}`} />
-      {c.label}
-    </span>
-  );
 }
 
 // ─── page ─────────────────────────────────────────────────────────────────────

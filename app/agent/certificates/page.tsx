@@ -1,3 +1,9 @@
+import type { Metadata } from 'next';
+
+export const metadata: Metadata = {
+  title: 'My Certificates · MVAutoAssist',
+};
+
 import { redirect } from 'next/navigation';
 import { Shield } from 'lucide-react';
 import { createClient } from '@/lib/supabase/server';

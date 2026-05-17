@@ -120,70 +120,92 @@ export async function createCertificate(form: CertFormData): Promise<
     if (!tierCheck || tierCheck.length === 0)
       return { ok: false, error: 'Selected RSA amount is not assigned to your account' };
 
-    // ── Generate cert_number (MV + YYYY + 8-digit padded sequence) ────────
-    // Service role needed to SELECT all cert_numbers, not just this dealer's.
+    // ── cert_number generation + INSERT with retry on race condition ─────
+    // Service role client needed to SELECT across all dealers' cert_numbers.
     const adminClient = createServiceClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!,
       { auth: { persistSession: false } }
     );
 
-    const certYear = new Date().getFullYear();
-    const { data: latestRows } = await adminClient
-      .from('certificates')
-      .select('cert_number')
-      .like('cert_number', `MV${certYear}%`)
-      .order('cert_number', { ascending: false })
-      .limit(1);
-
-    const latest = latestRows?.[0] ?? null;
-    let sequence = 1;
-    if (latest?.cert_number) {
-      const lastSeq = parseInt(latest.cert_number.slice(-8), 10);
-      if (!isNaN(lastSeq)) sequence = lastSeq + 1;
-    }
-    const cert_number = `MV${certYear}${String(sequence).padStart(8, '0')}`;
-
-    // ── Compute total server-side — never trust client math ───────────────
+    const certYear   = new Date().getFullYear();
     const total_amount = insuranceAmt + rsaAmt;
 
-    // ── INSERT ────────────────────────────────────────────────────────────
-    const { data: inserted, error: insertErr } = await supabase
-      .from('certificates')
-      .insert({
-        cert_number,
-        agent_id:          user.id,
-        status:            'pending',
-        customer_name:     form.customer_name.trim(),
-        customer_dob:      form.customer_dob || null,
-        customer_mobile:   form.customer_mobile,
-        customer_email:    form.customer_email.trim() || null,
-        customer_address:  form.customer_address.trim() || null,
-        vehicle_type:      form.vehicle_type,
-        registration_no:   form.registration_no.trim() || null,
-        make_model:        form.make_model.trim(),
-        variant:           form.variant.trim() || null,
-        engine_no:         form.engine_no.trim(),
-        chassis_no:        form.chassis_no.trim(),
-        fuel_type:         form.fuel_type,
-        manufacturing_year: mfgYear,
-        start_date:        form.start_date,
-        end_date:          form.end_date,
-        insurance_amount:  insuranceAmt,
-        rsa_amount:        rsaAmt,
-        total_amount,
-      })
-      .select('id')
-      .single();
+    // Retry up to 3 times on cert_number collision (23505 race condition).
+    // Each retry re-reads the current max, so it naturally advances past the collision.
+    // Random jitter (10–50 ms) staggers thundering-herd retries.
+    // TODO (post-launch): replace with a PostgreSQL sequence for zero-collision guarantee.
+    const MAX_RETRIES = 3;
 
-    if (insertErr) return { ok: false, error: insertErr.message };
-    if (!inserted)  return { ok: false, error: 'Certificate creation failed' };
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      // Fresh SELECT on every attempt — picks up any cert_numbers written since last try
+      const { data: latestRows } = await adminClient
+        .from('certificates')
+        .select('cert_number')
+        .like('cert_number', `MV${certYear}%`)
+        .order('cert_number', { ascending: false })
+        .limit(1);
 
-    revalidatePath('/agent/certificates');
-    revalidatePath('/admin/certificates');
-    revalidatePath('/admin/dashboard');
+      const lastSeq = latestRows?.[0]?.cert_number
+        ? parseInt(latestRows[0].cert_number.slice(-8), 10)
+        : 0;
+      const cert_number = `MV${certYear}${String(lastSeq + 1).padStart(8, '0')}`;
 
-    return { ok: true, certId: inserted.id, certNumber: cert_number };
+      const { data: inserted, error: insertErr } = await supabase
+        .from('certificates')
+        .insert({
+          cert_number,
+          agent_id:           user.id,
+          status:             'pending',
+          customer_name:      form.customer_name.trim(),
+          customer_dob:       form.customer_dob || null,
+          customer_mobile:    form.customer_mobile,
+          customer_email:     form.customer_email.trim() || null,
+          customer_address:   form.customer_address.trim() || null,
+          vehicle_type:       form.vehicle_type,
+          registration_no:    form.registration_no.trim() || null,
+          make_model:         form.make_model.trim(),
+          variant:            form.variant.trim() || null,
+          engine_no:          form.engine_no.trim(),
+          chassis_no:         form.chassis_no.trim(),
+          fuel_type:          form.fuel_type,
+          manufacturing_year: mfgYear,
+          start_date:         form.start_date,
+          end_date:           form.end_date,
+          insurance_amount:   insuranceAmt,
+          rsa_amount:         rsaAmt,
+          total_amount,
+        })
+        .select('id, cert_number')
+        .single();
+
+      if (!insertErr && inserted) {
+        // Success — cert created
+        revalidatePath('/agent/certificates');
+        revalidatePath('/admin/certificates');
+        revalidatePath('/admin/dashboard');
+        return { ok: true, certId: inserted.id, certNumber: inserted.cert_number };
+      }
+
+      if (insertErr?.code === '23505') {
+        // UNIQUE violation — another request won the race; retry with fresh SELECT
+        if (attempt < MAX_RETRIES) {
+          await new Promise(r => setTimeout(r, 10 + Math.random() * 40));
+          continue;
+        }
+        // All retries exhausted
+        return {
+          ok: false,
+          error: 'Certificate submission is busy. Please try again in a moment.',
+        };
+      }
+
+      // Any other DB error — give up immediately
+      return { ok: false, error: insertErr?.message ?? 'Certificate creation failed' };
+    }
+
+    // Should be unreachable, but satisfies TypeScript
+    return { ok: false, error: 'Unexpected error during certificate creation' };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : 'Unexpected error' };
   }
